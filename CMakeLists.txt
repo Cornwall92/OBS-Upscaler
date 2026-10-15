@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(obs-upscaler VERSION 0.2.0 LANGUAGES C)
+project(obs-upscaler VERSION 0.2.1 LANGUAGES C)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
   message(FATAL_ERROR "Use an out-of-source build: cmake -S . -B build")

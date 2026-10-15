@@ -8,7 +8,13 @@ This is **spatial scaling and sharpening**, not AI detail reconstruction. It can
 
 ## Install on Windows
 
-1. Download `obs-upscaler-windows-x64` from a successful run under [Actions](https://github.com/Cornwall92/OBS-Upscaler/actions). Extract the downloaded artifact to find `obs-upscaler-0.2.0-windows-x64.zip`.
+**Automatic installation:** download `obs-upscaler-windows-installer` from [Actions](https://github.com/Cornwall92/OBS-Upscaler/actions), extract it and run the `-setup.exe`. Close OBS first and accept the Windows administrator prompt. Setup places the plugin in `C:\ProgramData\obs-studio\plugins\obs-upscaler` (using the system's actual ProgramData location). Restart OBS and add **OBS Upscaler** under your source's **Effect Filters**.
+
+Re-running the installer updates the existing installation. Remove it using **Settings → Apps → Installed apps → OBS Upscaler**. OBS itself, scenes and other plugins are left intact. The installer is currently unsigned. It targets standard Windows x64 OBS installations; use the ZIP for portable OBS. If you previously installed manually inside OBS's program directory, remove that old copy first to avoid duplicate plugins.
+
+**Manual ZIP installation:**
+
+1. Download `obs-upscaler-windows-x64` from a successful run under [Actions](https://github.com/Cornwall92/OBS-Upscaler/actions). Extract the downloaded artifact to find `obs-upscaler-0.2.1-windows-x64.zip`.
 2. Close OBS. Extract that inner ZIP into `C:\ProgramData\obs-studio\plugins` (create the folder if needed). The resulting DLL must be at `C:\ProgramData\obs-studio\plugins\obs-upscaler\bin\64bit\obs-upscaler.dll` and the shader at `...\obs-upscaler\data\upscale.effect`.
 3. Start OBS. Right-click your game/video source → **Filters** → **Effect Filters +** → **OBS Upscaler**.
 
@@ -69,6 +75,14 @@ Windows: Visual Studio 2022 with C++ tools and a Windows 10/11 SDK, 64-bit Power
 ```
 
 The script verifies the minimum OBS SDK source checksum, builds its SDK, builds this plugin with compiler warnings treated as errors, runs policy and live Direct3D rendering tests, and creates the installable ZIP in `build-windows\packages`. The graphics test prefers Microsoft's software adapter when available; it does not benchmark your physical GPU. The script does not install anything into OBS. Source/dependency caches live in `.deps`. The plugin does not link Qt or an encoder library directly.
+
+To also build the automatic installer, install **Inno Setup 6.3 or newer** and run:
+
+```powershell
+.\scripts\build-windows.ps1 -BuildInstaller
+```
+
+Both the ZIP and setup EXE are written to `build-windows\packages`. Without the switch, the build only requires the original toolchain and creates the ZIP. CI builds both formats, tests installation and an in-place reinstall, compares installed files with the staged package, then verifies uninstallation preserves unrelated files.
 
 Linux development build (Ubuntu 24.04):
 

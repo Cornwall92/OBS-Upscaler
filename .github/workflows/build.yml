@@ -23,10 +23,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build, test and package
         shell: pwsh
-        run: ./scripts/build-windows.ps1
+        run: ./scripts/build-windows.ps1 -BuildInstaller
       - name: Test the same binary on latest stable OBS
         shell: pwsh
         run: ./scripts/test-latest-obs.ps1
+      - name: Verify installer, upgrade and uninstall
+        shell: pwsh
+        run: ./scripts/test-installer.ps1
       - name: Verify installable package layout
         shell: pwsh
         run: |
@@ -44,6 +47,12 @@ jobs:
               throw "Package is missing $_"
             }
           }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-upscaler-windows-installer
+          path: build-windows/packages/*-windows-x64-setup.exe
+          if-no-files-found: error
+          retention-days: 30
       - uses: actions/upload-artifact@v4
         with:
           name: obs-upscaler-windows-x64

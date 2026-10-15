@@ -6,7 +6,8 @@ param(
     [ValidateSet('Release', 'RelWithDebInfo', 'Debug')]
     [string] $Configuration = 'RelWithDebInfo',
     [string] $BuildDirectory = 'build-windows',
-    [switch] $SkipPackage
+    [switch] $SkipPackage,
+    [switch] $BuildInstaller
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,6 +34,19 @@ $BuildPath = if ([IO.Path]::IsPathRooted($BuildDirectory)) {
     $BuildDirectory
 } else {
     Join-Path $ProjectRoot $BuildDirectory
+}
+if ($BuildInstaller -and $SkipPackage) {
+    throw '-BuildInstaller cannot be combined with -SkipPackage.'
+}
+$InstallerCompiler = $null
+if ($BuildInstaller) {
+    $CompilerCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+    $InstallerCompiler = if ($CompilerCommand) { $CompilerCommand.Source } else {
+        Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+    }
+    if (-not (Test-Path $InstallerCompiler)) {
+        throw 'Install Inno Setup 6 (6.3 or newer), or add ISCC.exe to PATH, to use -BuildInstaller.'
+    }
 }
 $DependenciesPath = Join-Path $ProjectRoot '.deps'
 $SdkSpec = Get-Content (Join-Path $ProjectRoot 'cmake/obs-sdk.json') -Raw | ConvertFrom-Json
@@ -132,4 +146,19 @@ try {
 if (-not $SkipPackage) {
     Invoke-Checked cpack @('--config', (Join-Path $BuildPath 'CPackConfig.cmake'), '-C', $Configuration, '-B', (Join-Path $BuildPath 'packages'))
     Write-Host "Package ready in $BuildPath\packages."
+}
+
+if ($BuildInstaller) {
+    $StagePath = Join-Path $BuildPath 'installer-stage'
+    Invoke-Checked cmake @('--install', $BuildPath, '--config', $Configuration, '--prefix', $StagePath)
+    $CMakeCache = Get-Content (Join-Path $BuildPath 'CMakeCache.txt') -Raw
+    if ($CMakeCache -notmatch '(?m)^CMAKE_PROJECT_VERSION:STATIC=([0-9]+\.[0-9]+\.[0-9]+)\r?$') {
+        throw 'Cannot determine the plugin version from CMakeCache.txt.'
+    }
+    $PluginVersion = $Matches[1]
+    Invoke-Checked $InstallerCompiler @(
+        "/DPluginVersion=$PluginVersion", "/DStageDirectory=$StagePath",
+        "/DPackageDirectory=$(Join-Path $BuildPath 'packages')",
+        (Join-Path $ProjectRoot 'installer/obs-upscaler.iss')
+    )
 }
