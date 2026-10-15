@@ -20,8 +20,10 @@ if (-not [Environment]::Is64BitProcess) {
 
 function Invoke-Checked {
     param([string] $Command, [string[]] $Arguments)
+    $global:LASTEXITCODE = 0
     & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) {
+    $Succeeded = $?
+    if (-not $Succeeded -or $LASTEXITCODE -ne 0) {
         throw "$Command failed with exit code $LASTEXITCODE."
     }
 }
@@ -44,7 +46,11 @@ Get-Command ctest -ErrorAction Stop | Out-Null
 if (-not $SkipPackage) {
     Get-Command cpack -ErrorAction Stop | Out-Null
 }
-$CMakeVersionLine = & cmake --version | Select-Object -First 1
+$global:LASTEXITCODE = 0
+# Capture the complete native output before selecting a line. Stopping a native
+# pipeline early can leave LASTEXITCODE unset under PowerShell StrictMode.
+$CMakeVersionOutput = & cmake --version
+$CMakeVersionLine = $CMakeVersionOutput | Select-Object -First 1
 if ($LASTEXITCODE -ne 0 -or $CMakeVersionLine -notmatch '([0-9]+\.[0-9]+\.[0-9]+)') {
     throw 'Unable to determine the CMake version.'
 }
