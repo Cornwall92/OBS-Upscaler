@@ -1,0 +1,74 @@
+name: Build and test
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows x64 / OBS 31.1.1
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, test and package
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - name: Verify installable package layout
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem build-windows/packages/*-windows-x64.zip | Select-Object -First 1
+          if (-not $archive) { throw 'Package ZIP was not produced.' }
+          Expand-Archive $archive.FullName -DestinationPath build-windows/package-check
+          @(
+            'obs-upscaler/bin/64bit/obs-upscaler.dll',
+            'obs-upscaler/data/upscale.effect',
+            'obs-upscaler/data/locale/en-US.ini',
+            'obs-upscaler/README.md',
+            'obs-upscaler/LICENSE'
+          ) | ForEach-Object {
+            if (-not (Test-Path (Join-Path 'build-windows/package-check' $_))) {
+              throw "Package is missing $_"
+            }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-upscaler-windows-x64
+          path: build-windows/packages/*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    name: Linux compile and OpenGL smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and graphics test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config libobs-dev xvfb libgl1-mesa-dri
+      - name: Configure
+        run: cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_STRICT_WARNINGS=ON -DBUILD_OBS_SMOKE_TEST=ON
+      - name: Build
+        run: cmake --build build-linux --parallel
+      - name: Test policy and actual OpenGL filter rendering
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a ctest --test-dir build-linux --output-on-failure
+      - name: Package
+        run: cpack --config build-linux/CPackConfig.cmake
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-upscaler-linux-test-build
+          path: build-linux/packages/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14

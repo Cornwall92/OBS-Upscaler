@@ -1,0 +1,6 @@
+{
+  "version": "31.1.1",
+  "url": "https://github.com/obsproject/obs-studio/archive/refs/tags/31.1.1.zip",
+  "sha256": "2c8427c10b55ac6d68008df2e9a3e82f4647aaad18f105e30d4713c2de678ccf",
+  "reference": "https://github.com/obsproject/obs-plugintemplate/blob/3e7d7ac3b5342cd7d9b88890b9c70b472d1520fc/buildspec.json"
+}

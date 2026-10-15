@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Original spatial reconstruction shaders for OBS Upscaler.
+// SDR premultiplied RGBA input; output remains premultiplied RGBA.
+// No history buffers, frame generation, vendor extensions, or CPU readback.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float2 source_size;
+uniform float2 texel_size;
+uniform float sharpness;
+uniform bool anti_ringing;
+uniform bool split_enabled;
+uniform float split_position;
+
+sampler_state linear_sampler {
+	Filter = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertInOut {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+VertInOut VSDefault(VertInOut vert_in)
+{
+	VertInOut vert_out;
+	vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = vert_in.uv;
+	return vert_out;
+}
+
+// Catmull-Rom interpolation: B = 0, C = 0.5. The four weights sum to 1.
+float4 cubic_weights(float t)
+{
+	float t2 = t * t;
+	float t3 = t2 * t;
+	return float4(-0.5 * t + t2 - 0.5 * t3,
+		      1.0 - 2.5 * t2 + 1.5 * t3,
+		      0.5 * t + 2.0 * t2 - 1.5 * t3,
+		      -0.5 * t2 + 0.5 * t3);
+}
+
+float4 cubic_row(float2 first, float4 weights)
+{
+	return image.Sample(linear_sampler, first) * weights.x +
+	       image.Sample(linear_sampler, first + float2(texel_size.x, 0.0)) * weights.y +
+	       image.Sample(linear_sampler, first + float2(2.0 * texel_size.x, 0.0)) * weights.z +
+	       image.Sample(linear_sampler, first + float2(3.0 * texel_size.x, 0.0)) * weights.w;
+}
+
+float4 reconstruct_cubic(float2 uv)
+{
+	float2 pixel = uv * source_size - 0.5;
+	float2 origin = floor(pixel);
+	float2 fraction = pixel - origin;
+	float4 wx = cubic_weights(fraction.x);
+	float4 wy = cubic_weights(fraction.y);
+	float2 first = (origin - 0.5) * texel_size;
+	return cubic_row(first, wx) * wy.x +
+	       cubic_row(first + float2(0.0, texel_size.y), wx) * wy.y +
+	       cubic_row(first + float2(0.0, 2.0 * texel_size.y), wx) * wy.z +
+	       cubic_row(first + float2(0.0, 3.0 * texel_size.y), wx) * wy.w;
+}
+
+// sinc(x) * sinc(x / 3). The safe denominator avoids a NaN even on
+// drivers that evaluate both sides of a conditional expression.
+float lanczos_weight(float distance)
+{
+	float d = abs(distance);
+	float p = 3.14159265358979323846 * d;
+	float value = 3.0 * sin(p) * sin(p / 3.0) / max(p * p, 0.00000001);
+	return d < 0.0001 ? 1.0 : (d < 3.0 ? value : 0.0);
+}
+
+void lanczos_weights(float t, out float3 left, out float3 right)
+{
+	left = float3(lanczos_weight(t + 2.0), lanczos_weight(t + 1.0), lanczos_weight(t));
+	right = float3(lanczos_weight(1.0 - t), lanczos_weight(2.0 - t), lanczos_weight(3.0 - t));
+	float total = left.x + left.y + left.z + right.x + right.y + right.z;
+	left /= total;
+	right /= total;
+}
+
+float4 lanczos_row(float2 first, float3 left, float3 right)
+{
+	return image.Sample(linear_sampler, first) * left.x +
+	       image.Sample(linear_sampler, first + float2(texel_size.x, 0.0)) * left.y +
+	       image.Sample(linear_sampler, first + float2(2.0 * texel_size.x, 0.0)) * left.z +
+	       image.Sample(linear_sampler, first + float2(3.0 * texel_size.x, 0.0)) * right.x +
+	       image.Sample(linear_sampler, first + float2(4.0 * texel_size.x, 0.0)) * right.y +
+	       image.Sample(linear_sampler, first + float2(5.0 * texel_size.x, 0.0)) * right.z;
+}
+
+float4 reconstruct_lanczos(float2 uv)
+{
+	float2 pixel = uv * source_size - 0.5;
+	float2 origin = floor(pixel);
+	float2 fraction = pixel - origin;
+	float3 xl, xr, yl, yr;
+	lanczos_weights(fraction.x, xl, xr);
+	lanczos_weights(fraction.y, yl, yr);
+	float2 first = (origin - 1.5) * texel_size;
+	return lanczos_row(first, xl, xr) * yl.x +
+	       lanczos_row(first + float2(0.0, texel_size.y), xl, xr) * yl.y +
+	       lanczos_row(first + float2(0.0, 2.0 * texel_size.y), xl, xr) * yl.z +
+	       lanczos_row(first + float2(0.0, 3.0 * texel_size.y), xl, xr) * yr.x +
+	       lanczos_row(first + float2(0.0, 4.0 * texel_size.y), xl, xr) * yr.y +
+	       lanczos_row(first + float2(0.0, 5.0 * texel_size.y), xl, xr) * yr.z;
+}
+
+// Negative reconstruction lobes can overshoot both colour and coverage.
+// Restrict them to the four source pixels surrounding this output pixel.
+float4 limit_ringing(float2 uv, float4 value)
+{
+	float2 first = (floor(uv * source_size - 0.5) + 0.5) * texel_size;
+	float4 a = image.Sample(linear_sampler, first);
+	float4 b = image.Sample(linear_sampler, first + float2(texel_size.x, 0.0));
+	float4 c = image.Sample(linear_sampler, first + float2(0.0, texel_size.y));
+	float4 d = image.Sample(linear_sampler, first + texel_size);
+	return clamp(value, min(min(a, b), min(c, d)), max(max(a, b), max(c, d)));
+}
+
+float4 finish_pixel(float2 uv, float4 value, bool reconstruction)
+{
+	if (anti_ringing && reconstruction)
+		value = limit_ringing(uv, value);
+
+	// Four source-space neighbours provide an unsharp mask. Sharpen colour
+	// only: altering coverage creates outlines around transparent overlays.
+	if (sharpness > 0.0) {
+		float4 center = image.Sample(linear_sampler, uv);
+		float4 north = image.Sample(linear_sampler, uv - float2(0.0, texel_size.y));
+		float4 south = image.Sample(linear_sampler, uv + float2(0.0, texel_size.y));
+		float4 west = image.Sample(linear_sampler, uv - float2(texel_size.x, 0.0));
+		float4 east = image.Sample(linear_sampler, uv + float2(texel_size.x, 0.0));
+		float4 lo = min(center, min(min(north, south), min(west, east)));
+		float4 hi = max(center, max(max(north, south), max(west, east)));
+		float3 blur = (north.rgb + south.rgb + west.rgb + east.rgb) * 0.25;
+		// Fade sharpening at coverage transitions even when halo limiting is
+		// disabled. Uniformly translucent content retains its detail.
+		float coverage_guard = saturate(1.0 - (hi.a - lo.a) / max(hi.a, 0.0001));
+		float3 sharpened = value.rgb + (center.rgb - blur) * saturate(sharpness) * coverage_guard;
+		if (anti_ringing)
+			sharpened = clamp(sharpened, min(lo.rgb, value.rgb), max(hi.rgb, value.rgb));
+		value.rgb = sharpened;
+	}
+
+	// SDR range and premultiplied-alpha invariant, also when ringing is off.
+	value.a = saturate(value.a);
+	value.rgb = clamp(value.rgb, float3(0.0, 0.0, 0.0), float3(value.a, value.a, value.a));
+	return value;
+}
+
+float4 PSPerformance(VertInOut vert_in) : TARGET
+{
+	float4 value = image.Sample(linear_sampler, vert_in.uv);
+	if (split_enabled && vert_in.uv.x < split_position)
+		return value;
+	return finish_pixel(vert_in.uv, value, false);
+}
+
+float4 PSBalanced(VertInOut vert_in) : TARGET
+{
+	if (split_enabled && vert_in.uv.x < split_position)
+		return image.Sample(linear_sampler, vert_in.uv);
+	return finish_pixel(vert_in.uv, reconstruct_cubic(vert_in.uv), true);
+}
+
+float4 PSQuality(VertInOut vert_in) : TARGET
+{
+	if (split_enabled && vert_in.uv.x < split_position)
+		return image.Sample(linear_sampler, vert_in.uv);
+	return finish_pixel(vert_in.uv, reconstruct_lanczos(vert_in.uv), true);
+}
+
+technique Performance
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader = PSPerformance(vert_in);
+	}
+}
+
+technique Balanced
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader = PSBalanced(vert_in);
+	}
+}
+
+technique Quality
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader = PSQuality(vert_in);
+	}
+}
