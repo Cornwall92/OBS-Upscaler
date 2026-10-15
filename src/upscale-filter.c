@@ -12,11 +12,12 @@
 enum warning {
 	WARN_BACKEND = 1 << 0,
 	WARN_SHADER = 1 << 1,
-	WARN_HDR = 1 << 2,
+	WARN_COLOR = 1 << 2,
 	WARN_SIZE = 1 << 3,
 	WARN_CANVAS = 1 << 4,
 	WARN_OUTPUT = 1 << 5,
 	WARN_LAG = 1 << 6,
+	WARN_HDR_TO_SDR = 1 << 7,
 };
 
 struct upscale_filter {
@@ -24,7 +25,8 @@ struct upscale_filter {
 	pthread_mutex_t mutex;
 	gs_effect_t *effect;
 	gs_eparam_t *source_size, *texel_size, *sharpness_param;
-	gs_eparam_t *split_param, *position_param, *ringing_param;
+	gs_eparam_t *split_param, *position_param, *ringing_param, *hdr_param;
+	enum gs_color_space color_space;
 	bool supported, adaptive, split, anti_ringing, rendered;
 	int mode, size;
 	uint32_t custom_width, custom_height;
@@ -84,11 +86,14 @@ static void refresh_dimensions(struct upscale_filter *filter)
 		warnings |= WARN_SHADER;
 	if (dimensions.result == UPSCALE_TOO_LARGE)
 		warnings |= WARN_SIZE;
-	if ((space != GS_CS_SRGB && space != GS_CS_SRGB_16F) || video.colorspace == VIDEO_CS_2100_PQ ||
-	    video.colorspace == VIDEO_CS_2100_HLG)
-		warnings |= WARN_HDR;
+	filter->color_space = space;
+	const bool hdr = space == GS_CS_709_EXTENDED || space == GS_CS_709_SCRGB;
+	if (space != GS_CS_SRGB && space != GS_CS_SRGB_16F && !hdr)
+		warnings |= WARN_COLOR;
+	if (hdr && video.colorspace != VIDEO_CS_2100_PQ && video.colorspace != VIDEO_CS_2100_HLG)
+		warnings |= WARN_HDR_TO_SDR;
 	filter->bypass =
-	    dimensions.result != UPSCALE_READY || (warnings & (WARN_BACKEND | WARN_SHADER | WARN_SIZE | WARN_HDR));
+	    dimensions.result != UPSCALE_READY || (warnings & (WARN_BACKEND | WARN_SHADER | WARN_SIZE | WARN_COLOR));
 	filter->output_width = filter->bypass ? input_width : dimensions.width;
 	filter->output_height = filter->bypass ? input_height : dimensions.height;
 	if (!filter->bypass) {
@@ -176,8 +181,9 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source)
 		filter->split_param = gs_effect_get_param_by_name(filter->effect, "split_enabled");
 		filter->position_param = gs_effect_get_param_by_name(filter->effect, "split_position");
 		filter->ringing_param = gs_effect_get_param_by_name(filter->effect, "anti_ringing");
+		filter->hdr_param = gs_effect_get_param_by_name(filter->effect, "hdr_input");
 		if (!filter->source_size || !filter->texel_size || !filter->sharpness_param || !filter->split_param ||
-		    !filter->position_param || !filter->ringing_param ||
+		    !filter->position_param || !filter->ringing_param || !filter->hdr_param ||
 		    !gs_effect_get_technique(filter->effect, "Performance") ||
 		    !gs_effect_get_technique(filter->effect, "Balanced") ||
 		    !gs_effect_get_technique(filter->effect, "Quality")) {
@@ -253,7 +259,6 @@ static void filter_render(void *data, gs_effect_t *unused)
 
 	/* Source sizes can change between ticks (capture resize or filter reorder). */
 	refresh_dimensions(filter);
-	const enum gs_color_space current = gs_get_color_space();
 	const enum gs_color_space space = target_space(target);
 
 	pthread_mutex_lock(&filter->mutex);
@@ -271,7 +276,7 @@ static void filter_render(void *data, gs_effect_t *unused)
 
 	/* Never hold our mutex while rendering upstream: a source or earlier
 	 * filter may query the parent's output size and re-enter our getters. */
-	if (bypass || (current != GS_CS_SRGB && current != GS_CS_SRGB_16F)) {
+	if (bypass) {
 		obs_source_skip_video_filter(filter->source);
 		return;
 	}
@@ -287,6 +292,7 @@ static void filter_render(void *data, gs_effect_t *unused)
 		gs_effect_set_bool(filter->split_param, split);
 		gs_effect_set_float(filter->position_param, split_position);
 		gs_effect_set_bool(filter->ringing_param, anti_ringing);
+		gs_effect_set_bool(filter->hdr_param, space == GS_CS_709_EXTENDED || space == GS_CS_709_SCRGB);
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 		obs_source_process_filter_tech_end(filter->source, filter->effect, output_width, output_height,
@@ -316,6 +322,10 @@ static uint32_t filter_height(void *data)
 	return height;
 }
 
+/* Advertise the source's native space. OBS wraps this filter in its normal
+ * colour-space conversion when the destination differs. This keeps HDR in a
+ * float texture until after scaling, and delegates white-level conversion,
+ * scRGB, HDR-to-SDR tone mapping and output transfer functions to libobs. */
 static enum gs_color_space filter_space(void *data, size_t count, const enum gs_color_space *spaces)
 {
 	UNUSED_PARAMETER(count);
@@ -334,18 +344,27 @@ static void set_diagnostics(obs_properties_t *props, struct upscale_filter *filt
 	snprintf(
 	    text, sizeof(text),
 	    "Backend: %s | OBS %s\nInput: %ux%u -> filter: %ux%u | OBS: %.2f FPS\n"
-	    "Selected: %s | Effective: %s%s\n"
+	    "Colour processing: %s\nSelected: %s | Effective: %s%s\n"
 	    "OBS average render time: %.2f ms | render lag in last sample: %.2f%%\n"
-	    "These are OBS-wide statistics, not this filter's GPU time. Click Refresh to update.\n%s%s%s%s%s%s%s%s%s%s",
+	    "These are OBS-wide statistics, not this filter's GPU time. Click Refresh to "
+	    "update.\n%s%s%s%s%s%s%s%s%s%s%s",
 	    filter->backend, obs_get_version_string(), filter->input_width, filter->input_height, filter->output_width,
-	    filter->output_height, fps, mode_name(filter->mode), mode_name(filter->adaptation.effective_mode),
-	    filter->bypass ? " (bypassed)" : "", filter->average_ms, filter->lag_percent,
+	    filter->output_height, fps,
+	    filter->color_space == GS_CS_709_EXTENDED					   ? "HDR (extended Rec.709)"
+	    : filter->color_space == GS_CS_709_SCRGB					   ? "HDR (scRGB)"
+	    : (filter->color_space == GS_CS_SRGB || filter->color_space == GS_CS_SRGB_16F) ? "SDR"
+											   : "Unknown",
+	    mode_name(filter->mode), mode_name(filter->adaptation.effective_mode), filter->bypass ? " (bypassed)" : "",
+	    filter->average_ms, filter->lag_percent,
 	    filter->warnings & WARN_BACKEND ? "WARNING: Unsupported graphics backend. Source passed through.\n" : "",
 	    filter->warnings & WARN_SHADER ? "WARNING: Shader could not load/compile. Check data files, driver and OBS "
 					     "log. Source passed through.\n"
 					   : "",
-	    filter->warnings & WARN_HDR
-		? "WARNING: HDR/extended colour is unsupported in this version. Source passed through unchanged.\n"
+	    filter->warnings & WARN_COLOR
+		? "WARNING: Unknown colour space. Source passed through unchanged; check for a plugin update.\n"
+		: "",
+	    filter->warnings & WARN_HDR_TO_SDR
+		? "NOTICE: HDR source with SDR output. OBS will tone-map to SDR; choose an HDR output to retain HDR.\n"
 		: "",
 	    filter->warnings & WARN_SIZE ? "WARNING: Invalid or excessive dimensions. Limit: 8192 per axis and 33.55 "
 					   "megapixels. Source passed through.\n"
@@ -450,7 +469,7 @@ static void filter_defaults(obs_data_t *settings)
 struct obs_source_info upscale_filter_info = {
     .id = "obs_upscaler_filter",
     .type = OBS_SOURCE_TYPE_FILTER,
-    .output_flags = OBS_SOURCE_VIDEO,
+    .output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB,
     .get_name = filter_name,
     .create = filter_create,
     .destroy = filter_destroy,

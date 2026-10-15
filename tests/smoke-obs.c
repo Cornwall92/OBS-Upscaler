@@ -7,6 +7,7 @@
 #include <util/platform.h>
 
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -111,6 +112,7 @@ static bool draw_shader(gs_effect_t *effect, const char *technique, const uint8_
 	gs_effect_set_vec2(gs_effect_get_param_by_name(effect, "source_size"), &size);
 	gs_effect_set_vec2(gs_effect_get_param_by_name(effect, "texel_size"), &inverse);
 	gs_effect_set_float(gs_effect_get_param_by_name(effect, "sharpness"), sharpness);
+	gs_effect_set_bool(gs_effect_get_param_by_name(effect, "hdr_input"), false);
 	gs_effect_set_bool(gs_effect_get_param_by_name(effect, "anti_ringing"), true);
 	gs_effect_set_bool(gs_effect_get_param_by_name(effect, "split_enabled"), split);
 	gs_effect_set_float(gs_effect_get_param_by_name(effect, "split_position"), 1.0f);
@@ -226,7 +228,7 @@ static void test_shaders(const char *data_path)
 
 struct synthetic_source {
 	uint32_t width, height;
-	bool hdr;
+	bool hdr, scrgb;
 	obs_source_t *owner;
 };
 
@@ -242,6 +244,7 @@ static void synthetic_update(void *opaque, obs_data_t *settings)
 	source->width = (uint32_t)obs_data_get_int(settings, "width");
 	source->height = (uint32_t)obs_data_get_int(settings, "height");
 	source->hdr = obs_data_get_bool(settings, "hdr");
+	source->scrgb = obs_data_get_bool(settings, "scrgb");
 }
 
 static void *synthetic_create(obs_data_t *settings, obs_source_t *owner)
@@ -269,7 +272,8 @@ static enum gs_color_space synthetic_color_space(void *opaque, size_t count, con
 {
 	UNUSED_PARAMETER(count);
 	UNUSED_PARAMETER(preferred);
-	return ((struct synthetic_source *)opaque)->hdr ? GS_CS_709_EXTENDED : GS_CS_SRGB;
+	struct synthetic_source *source = opaque;
+	return source->hdr ? (source->scrgb ? GS_CS_709_SCRGB : GS_CS_709_EXTENDED) : GS_CS_SRGB;
 }
 
 static void synthetic_render(void *opaque, gs_effect_t *unused)
@@ -282,10 +286,112 @@ static void synthetic_render(void *opaque, gs_effect_t *unused)
 	CHECK(obs_source_get_width(source->owner) > 0, "upstream render can query filtered dimensions");
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
 	struct vec4 color;
-	vec4_set(&color, 0.25f, 0.5f, 0.75f, 1.0f);
+	if (source->hdr)
+		vec4_set(&color, 4.0f, 2.0f, -0.25f, 0.5f);
+	else
+		vec4_set(&color, 0.25f, 0.5f, 0.75f, 1.0f);
 	gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
+	/* A custom source owns its straight-to-premultiplied alpha blend state,
+	 * including when OBS renders it inside a colour conversion texture. */
+	gs_blend_state_push();
+	gs_enable_blending(true);
+	gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA, GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 	while (gs_effect_loop(effect, "Solid"))
 		gs_draw_sprite(NULL, 0, source->width, source->height);
+	gs_blend_state_pop();
+}
+
+/* Read floating-point pixels after the complete filter/OBS colour pipeline.
+ * A 32F destination avoids quantizing our assertions; the filter's own HDR
+ * capture still uses OBS's normal 16F texture format. */
+static bool render_float_source(obs_source_t *source, enum gs_color_space space, float *pixel)
+{
+	gs_texrender_t *render = gs_texrender_create(GS_RGBA32F, GS_ZS_NONE);
+	gs_stagesurf_t *stage = gs_stagesurface_create(64, 36, GS_RGBA32F);
+	bool ok = false;
+	if (!render || !stage || !gs_texrender_begin_with_color_space(render, 64, 36, space))
+		goto cleanup;
+	struct vec4 clear = {0};
+	gs_clear(GS_CLEAR_COLOR, &clear, 0, 0);
+	gs_ortho(0, 64, 0, 36, -100, 100);
+	gs_enable_depth_test(false);
+	gs_set_cull_mode(GS_NEITHER);
+	gs_blend_state_push();
+	gs_enable_blending(true);
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+	obs_source_video_render(source);
+	gs_blend_state_pop();
+	gs_texrender_end(render);
+	gs_stage_texture(stage, gs_texrender_get_texture(render));
+	uint8_t *mapped = NULL;
+	uint32_t stride = 0;
+	if (gs_stagesurface_map(stage, &mapped, &stride)) {
+		memcpy(pixel, mapped + 18 * stride + 32 * 4 * sizeof(float), 4 * sizeof(float));
+		gs_stagesurface_unmap(stage);
+		ok = true;
+	}
+cleanup:
+	gs_stagesurface_destroy(stage);
+	gs_texrender_destroy(render);
+	return ok;
+}
+
+static void test_hdr(obs_source_t *source, obs_source_t *filter, obs_data_t *source_settings, obs_data_t *settings)
+{
+	obs_data_set_int(settings, "size", 3);
+	obs_data_set_int(settings, "width", 64);
+	obs_data_set_int(settings, "height", 36);
+	obs_data_set_bool(source_settings, "hdr", true);
+	for (int input = 0; input < 2; input++) {
+		obs_data_set_bool(source_settings, "scrgb", input != 0);
+		obs_source_update(source, source_settings);
+		for (int mode = 0; mode < 4; mode++) {
+			obs_data_set_int(settings, "mode", mode < 3 ? mode : 2);
+			obs_data_set_double(settings, "sharpness", 1.0);
+			obs_data_set_bool(settings, "split", mode == 3);
+			obs_data_set_double(settings, "split_position", 1.0);
+			obs_source_update(filter, settings);
+			os_sleep_ms(60);
+			CHECK(obs_source_get_width(source) == 64 && obs_source_get_height(source) == 36,
+			      "HDR source is upscaled rather than bypassed");
+			const enum gs_color_space outputs[] = {GS_CS_709_EXTENDED, GS_CS_709_SCRGB, GS_CS_SRGB_16F};
+			for (size_t output = 0; output < 3; output++) {
+				float pixel[4] = {0};
+				obs_enter_graphics();
+				bool read = render_float_source(source, outputs[output], pixel);
+				obs_leave_graphics();
+				CHECK(read, "HDR output reads back as floating-point data");
+				CHECK(isfinite(pixel[0]) && isfinite(pixel[1]) && isfinite(pixel[2]),
+				      "HDR processing/conversion produces finite colours");
+				CHECK(fabsf(pixel[3] - 0.5f) < 0.005f, "HDR processing preserves translucent alpha");
+				if (output < 2) {
+					float multiplier = input == (int)output
+							       ? 1.0f
+							       : (input == 0 ? obs_get_video_sdr_white_level() / 80.0f
+									     : 80.0f / obs_get_video_sdr_white_level());
+					const bool correct = fabsf(pixel[0] - 2.0f * multiplier) < 0.015f &&
+							     fabsf(pixel[1] - multiplier) < 0.015f &&
+							     fabsf(pixel[2] + 0.125f * multiplier) < 0.015f;
+					if (!correct)
+						fprintf(stderr,
+							"HDR input %d mode %d output %zu: %f %f %f %f, scale %f\n",
+							input, mode, output, pixel[0], pixel[1], pixel[2], pixel[3],
+							multiplier);
+					CHECK(correct, "HDR brightness, negative wide-gamut components and white-level "
+						       "conversion survive");
+				} else {
+					CHECK(pixel[0] > pixel[1] && pixel[0] <= 1.0f && pixel[0] > 0.1f,
+					      "OBS tone maps HDR to SDR without blank or all-white output");
+				}
+			}
+		}
+	}
+	obs_data_set_bool(settings, "split", false);
+	obs_data_set_bool(source_settings, "hdr", false);
+	obs_source_update(source, source_settings);
+	obs_source_update(filter, settings);
+	os_sleep_ms(60);
+	CHECK(obs_source_get_width(source) == 64, "filter keeps upscaling after HDR to SDR source change");
 }
 
 static void test_plugin(const char *binary_path, const char *data_path)
@@ -362,15 +468,7 @@ static void test_plugin(const char *binary_path, const char *data_path)
 	os_sleep_ms(100);
 	CHECK(obs_source_get_width(source) == 3840 && obs_source_get_height(source) == 2160,
 	      "4K preset reports 3840x2160 for a 16:9 source");
-	obs_data_set_bool(source_settings, "hdr", true);
-	obs_source_update(source, source_settings);
-	os_sleep_ms(100);
-	CHECK(obs_source_get_width(source) == 32 && obs_source_get_height(source) == 18,
-	      "unsupported HDR input bypasses upscaling at native dimensions");
-	obs_data_set_bool(source_settings, "hdr", false);
-	obs_source_update(source, source_settings);
-	os_sleep_ms(100);
-	CHECK(obs_source_get_width(source) == 3840, "filter recovers when source returns to SDR");
+	test_hdr(source, filter, source_settings, settings);
 	obs_data_set_int(settings, "size", 3);
 	obs_data_set_int(settings, "width", 100000);
 	obs_source_update(filter, settings);
@@ -390,6 +488,15 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Usage: %s <plugin-binary> <plugin-data-directory> [graphics-module]\n", argv[0]);
 		return 2;
 	}
+	if (argc > 4) {
+		const char *actual = obs_get_version_string();
+		size_t length = strlen(argv[4]);
+		if (strncmp(actual, argv[4], length) != 0 || (actual[length] != '\0' && actual[length] != '-')) {
+			fprintf(stderr, "FAIL: expected runtime %s, loaded %s\n", argv[4], actual);
+			return 1;
+		}
+	}
+	printf("Testing OBS runtime %s\n", obs_get_version_string());
 	if (!obs_startup("en-US", NULL, NULL)) {
 		fputs("FAIL: obs_startup\n", stderr);
 		return 1;
@@ -417,11 +524,14 @@ int main(int argc, char **argv)
 #endif
 	int result = obs_reset_video(&video);
 	if (result != OBS_VIDEO_SUCCESS) {
-		fprintf(stderr, "FAIL: graphics initialization (%d); Linux needs DISPLAY / xvfb-run; "
-				"Windows needs a D3D11-capable DXGI adapter and OBS runtime dependencies.\n", result);
+		fprintf(stderr,
+			"FAIL: graphics initialization (%d); Linux needs DISPLAY / xvfb-run; "
+			"Windows needs a D3D11-capable DXGI adapter and OBS runtime dependencies.\n",
+			result);
 		obs_shutdown();
 		return 1;
 	}
+	obs_set_video_levels(300.0f, 1000.0f);
 	obs_enter_graphics();
 	test_shaders(argv[2]);
 	obs_leave_graphics();
@@ -434,6 +544,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "%u smoke check(s) failed\n", failures);
 		return 1;
 	}
-	puts("PASS: shader compilation/readback, all presets, alpha, split view, module load, resize and safe bypass");
+	puts("PASS: shader compilation/readback, all presets, HDR/SDR conversion, alpha, split view, module load, "
+	     "resize and safe bypass");
 	return 0;
 }

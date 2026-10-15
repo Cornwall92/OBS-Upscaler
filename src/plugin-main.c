@@ -20,8 +20,14 @@ extern struct obs_source_info upscale_filter_info;
 
 bool obs_module_load(void)
 {
+	/* No upper-version restriction: use the stable public libobs API. */
+	if (obs_get_version() < PLUGIN_MIN_OBS_API)
+		blog(LOG_WARNING,
+		     "[obs-upscaler] OBS %s is below the supported minimum %s. "
+		     "This older runtime is best-effort only; please upgrade.",
+		     obs_get_version_string(), PLUGIN_MIN_OBS_VERSION);
 	obs_register_source(&upscale_filter_info);
-	blog(LOG_INFO, "[obs-upscaler] %s loaded (built for OBS 31.1.1; runtime %s)", PLUGIN_VERSION,
+	blog(LOG_INFO, "[obs-upscaler] %s loaded (minimum OBS %s; runtime %s)", PLUGIN_VERSION, PLUGIN_MIN_OBS_VERSION,
 	     obs_get_version_string());
 	return true;
 }

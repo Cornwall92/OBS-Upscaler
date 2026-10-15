@@ -1,6 +1,6 @@
 # OBS Upscaler
 
-A GPU video filter for OBS Studio, built for **OBS 31.1.1 on Windows x64**. Upscale 1920 × 1080 to 3840 × 2160 using Performance, Balanced or Quality presets, while keeping OBS's configured frame rate. Other source sizes and aspect ratios work too.
+A GPU video filter for OBS Studio, supporting **OBS 31.1.1 or newer on Windows x64**. Upscale 1920 × 1080 to 3840 × 2160 using Performance, Balanced or Quality presets, while keeping OBS's configured frame rate. Other source sizes and aspect ratios work too.
 
 The same binary uses standard graphics shaders on **NVIDIA, AMD and Intel** GPUs through OBS's Direct3D 11 backend. There is no CUDA, Tensor Core, RTX, DLSS, or vendor SDK requirement. Linux/OpenGL is also built and tested. macOS packaging and Windows ARM64 are not included.
 
@@ -8,7 +8,7 @@ This is **spatial scaling and sharpening**, not AI detail reconstruction. It can
 
 ## Install on Windows
 
-1. Download `obs-upscaler-windows-x64` from a successful run under [Actions](https://github.com/Cornwall92/OBS-Upscaler/actions). Extract the downloaded artifact to find `obs-upscaler-0.1.0-windows-x64.zip`.
+1. Download `obs-upscaler-windows-x64` from a successful run under [Actions](https://github.com/Cornwall92/OBS-Upscaler/actions). Extract the downloaded artifact to find `obs-upscaler-0.2.0-windows-x64.zip`.
 2. Close OBS. Extract that inner ZIP into `C:\ProgramData\obs-studio\plugins` (create the folder if needed). The resulting DLL must be at `C:\ProgramData\obs-studio\plugins\obs-upscaler\bin\64bit\obs-upscaler.dll` and the shader at `...\obs-upscaler\data\upscale.effect`.
 3. Start OBS. Right-click your game/video source → **Filters** → **Effect Filters +** → **OBS Upscaler**.
 
@@ -46,7 +46,10 @@ Automatic fallback uses OBS's overall render lag (at least 1% in a sample) or av
 
 ## Compatibility and warnings
 
-- **SDR only in this version.** HDR/extended-colour sources or an HDR OBS output pipeline bypass the filter without applying an SDR clamp. Use OBS's own scaler for HDR.
+- **Minimum OBS: 31.1.1. No upper-version lock.** Releases build against the minimum SDK and CI tests the same Windows binary against the latest stable OBS release. Future releases are expected to work while OBS preserves the public plugin API/ABI; compatibility with unreleased versions cannot be guaranteed. Older runtimes log a warning if they can load the module.
+- **SDR and HDR supported.** Scaling and sharpening operate in linear light. HDR uses floating-point textures, preserves highlights above SDR white and negative wide-gamut components, and supports OBS extended Rec.709 and scRGB working spaces. OBS handles source transfer functions, colour conversion and output tone mapping. Unknown future colour spaces bypass safely.
+- For HDR recording/output, use an HDR source and configure OBS under Settings → Advanced → Video for a 10-bit format such as P010 and Rec.2100 PQ or HLG, with an HDR-capable encoder/container and playback chain. The filter does not enable HDR output or turn SDR captures into HDR. HDR sources on an SDR output trigger a tone-mapping notice; highlights remain HDR internally until OBS converts them.
+- HDR display appearance, encoder metadata and hardware performance still need validation on the actual capture/playback system. The automated tests validate floating-point pixels and conversion, not a complete encoded HDR recording.
 - The graphics backend must be Direct3D 11 or OpenGL and must compile the effect successfully. A missing shader, a shader compiler failure or an unsupported backend leaves the source passing through and reports a warning.
 - Custom bounds must be 16–8192 pixels on each axis and at most 33,554,432 pixels in area. Oversized input/output requests pass through. These are conservative plugin limits, not a promise about free GPU memory.
 - Sources already at or above the selected bounds pass through. Empty sources wait for video.
@@ -65,7 +68,7 @@ Windows: Visual Studio 2022 with C++ tools and a Windows 10/11 SDK, 64-bit Power
 .\scripts\build-windows.ps1
 ```
 
-The script verifies the OBS 31.1.1 source checksum, builds its SDK, builds this plugin with compiler warnings treated as errors, runs policy and live Direct3D rendering tests, and creates the installable ZIP in `build-windows\packages`. The graphics test prefers Microsoft's software adapter when available; it does not benchmark your physical GPU. The script does not install anything into OBS. Source/dependency caches live in `.deps`. The plugin does not link Qt or an encoder library directly.
+The script verifies the minimum OBS SDK source checksum, builds its SDK, builds this plugin with compiler warnings treated as errors, runs policy and live Direct3D rendering tests, and creates the installable ZIP in `build-windows\packages`. The graphics test prefers Microsoft's software adapter when available; it does not benchmark your physical GPU. The script does not install anything into OBS. Source/dependency caches live in `.deps`. The plugin does not link Qt or an encoder library directly.
 
 Linux development build (Ubuntu 24.04):
 
@@ -77,9 +80,9 @@ cmake --build build --parallel
 LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a ctest --test-dir build --output-on-failure
 ```
 
-You can set `CMAKE_PREFIX_PATH` to a separately installed OBS SDK. Ubuntu's libobs can be older than the Windows target; the Linux job tests the shared API/OpenGL code, while the Windows job compiles against the pinned 31.1.1 SDK.
+You can set `CMAKE_PREFIX_PATH` to a separately installed OBS SDK. Ubuntu's libobs can be older than the Windows target; the Linux job tests the shared API/OpenGL code, while the Windows job compiles against the minimum SDK. The Windows workflow also downloads the latest official stable OBS runtime and runs the same binary against it; it checks the loaded runtime version to avoid accidentally testing the SDK twice. Run this check manually with `./scripts/test-latest-obs.ps1` after building.
 
-Without an OBS SDK, build just the policy tests with `-DBUILD_PLUGIN=OFF`. The live graphics tests compile all shader techniques, render and read back sample textures, and exercise the loaded filter on Windows/Direct3D and Linux/OpenGL. Software rendering validates correctness, **not hardware throughput**. No production frames are copied back to the CPU by the plugin.
+Without an OBS SDK, build just the policy tests with `-DBUILD_PLUGIN=OFF`. The live graphics tests compile all shader techniques, render and read back SDR/HDR sample textures (including bright highlights, negative gamut values, alpha and HDR/SDR conversions), and exercise the loaded filter on Windows/Direct3D and Linux/OpenGL. Software rendering validates correctness, **not hardware throughput**. No production frames are copied back to the CPU by the plugin.
 
 ## Validation before a live stream
 

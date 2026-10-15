@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(obs-upscaler VERSION 0.1.0 LANGUAGES C)
+project(obs-upscaler VERSION 0.2.0 LANGUAGES C)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
   message(FATAL_ERROR "Use an out-of-source build: cmake -S . -B build")
@@ -10,6 +10,15 @@ option(ENABLE_STRICT_WARNINGS "Treat warnings in this project as errors" OFF)
 option(BUILD_OBS_SMOKE_TEST "Build a live libobs graphics test (requires a display)" OFF)
 include(CTest)
 include(GNUInstallDirs)
+# The release SDK is the supported minimum, not a maximum runtime version.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cmake/obs-sdk.json" OBS_SDK_SPEC)
+string(JSON OBS_MINIMUM_VERSION GET "${OBS_SDK_SPEC}" version)
+string(REPLACE "." ";" OBS_VERSION_PARTS "${OBS_MINIMUM_VERSION}")
+list(GET OBS_VERSION_PARTS 0 OBS_MIN_MAJOR)
+list(GET OBS_VERSION_PARTS 1 OBS_MIN_MINOR)
+list(GET OBS_VERSION_PARTS 2 OBS_MIN_PATCH)
+math(EXPR OBS_MINIMUM_API "(${OBS_MIN_MAJOR} << 24) | (${OBS_MIN_MINOR} << 16) | ${OBS_MIN_PATCH}")
+
 
 function(upscaler_compile_options target)
   target_compile_features(${target} PRIVATE c_std_11)
@@ -29,7 +38,7 @@ endfunction()
 
 if(BUILD_PLUGIN)
   # A custom SDK can be supplied through CMAKE_PREFIX_PATH or libobs_DIR.
-  # scripts/build-windows.ps1 builds the pinned OBS 31.1.1 SDK on Windows.
+  # Build releases against the minimum SDK; newer compatible runtimes are allowed.
   find_package(libobs CONFIG QUIET)
   if(NOT TARGET OBS::libobs)
     if(WIN32)
@@ -39,11 +48,11 @@ if(BUILD_PLUGIN)
     pkg_check_modules(LIBOBS REQUIRED IMPORTED_TARGET libobs)
     add_library(OBS::libobs ALIAS PkgConfig::LIBOBS)
   endif()
-  if(DEFINED libobs_VERSION AND libobs_VERSION VERSION_LESS 31.1.1)
-    message(WARNING "This build uses OBS ${libobs_VERSION}. Windows releases target OBS 31.1.1; recheck API/runtime compatibility before distributing this build.")
+  if(DEFINED libobs_VERSION AND libobs_VERSION VERSION_LESS OBS_MINIMUM_VERSION)
+    message(WARNING "This build uses OBS ${libobs_VERSION}. This is a development compatibility build below the supported minimum OBS ${OBS_MINIMUM_VERSION}.")
   endif()
   if(WIN32 AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "OBS 31.1.1 requires a 64-bit plugin. Configure with -A x64.")
+    message(FATAL_ERROR "The Windows package requires a 64-bit plugin. Configure with -A x64.")
   endif()
   if(APPLE)
     message(WARNING "macOS packaging and runtime compatibility are not validated in this release.")
@@ -57,7 +66,8 @@ if(BUILD_PLUGIN)
   if(NOT WIN32)
     target_link_libraries(obs-upscaler PRIVATE m)
   endif()
-  target_compile_definitions(obs-upscaler PRIVATE PLUGIN_VERSION="${PROJECT_VERSION}")
+  target_compile_definitions(obs-upscaler PRIVATE PLUGIN_VERSION="${PROJECT_VERSION}"
+    PLUGIN_MIN_OBS_VERSION="${OBS_MINIMUM_VERSION}" PLUGIN_MIN_OBS_API=${OBS_MINIMUM_API})
   set_target_properties(obs-upscaler PROPERTIES PREFIX "")
   upscaler_compile_options(obs-upscaler)
 

@@ -16,13 +16,17 @@ concurrency:
 
 jobs:
   windows:
-    name: Windows x64 / OBS 31.1.1
+    name: Windows x64 / minimum and latest OBS
     runs-on: windows-2022
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Build, test and package
         shell: pwsh
         run: ./scripts/build-windows.ps1
+      - name: Test the same binary on latest stable OBS
+        shell: pwsh
+        run: ./scripts/test-latest-obs.ps1
       - name: Verify installable package layout
         shell: pwsh
         run: |

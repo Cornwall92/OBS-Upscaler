@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Original spatial reconstruction shaders for OBS Upscaler.
-// SDR premultiplied RGBA input; output remains premultiplied RGBA.
+// Linear-light premultiplied RGBA, with floating-point HDR range preserved.
+// OBS handles transfer functions, white levels and destination colour conversion.
 // No history buffers, frame generation, vendor extensions, or CPU readback.
 
 uniform float4x4 ViewProj;
@@ -8,6 +9,7 @@ uniform texture2d image;
 uniform float2 source_size;
 uniform float2 texel_size;
 uniform float sharpness;
+uniform bool hdr_input;
 uniform bool anti_ringing;
 uniform bool split_enabled;
 uniform float split_position;
@@ -147,9 +149,17 @@ float4 finish_pixel(float2 uv, float4 value, bool reconstruction)
 		value.rgb = sharpened;
 	}
 
-	// SDR range and premultiplied-alpha invariant, also when ringing is off.
+	// HDR RGB may exceed alpha/1.0 and may be negative (wide gamut in a
+	// Rec.709/scRGB working space). Do not apply the SDR clamp to that data.
 	value.a = saturate(value.a);
-	value.rgb = clamp(value.rgb, float3(0.0, 0.0, 0.0), float3(value.a, value.a, value.a));
+	if (hdr_input) {
+		value.rgb = clamp(value.rgb, float3(-65504.0, -65504.0, -65504.0),
+				  float3(65504.0, 65504.0, 65504.0));
+		if (value.a == 0.0)
+			value.rgb = float3(0.0, 0.0, 0.0);
+	} else {
+		value.rgb = clamp(value.rgb, float3(0.0, 0.0, 0.0), float3(value.a, value.a, value.a));
+	}
 	return value;
 }
 
