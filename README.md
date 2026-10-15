@@ -65,7 +65,7 @@ Windows: Visual Studio 2022 with C++ tools and a Windows 10/11 SDK, 64-bit Power
 .\scripts\build-windows.ps1
 ```
 
-The script verifies the OBS 31.1.1 source checksum, builds its SDK, builds this plugin with compiler warnings treated as errors, runs policy tests, and creates the installable ZIP in `build-windows\packages`. It does not install anything into OBS. Source/dependency caches live in `.deps`. The plugin does not link Qt or an encoder library directly.
+The script verifies the OBS 31.1.1 source checksum, builds its SDK, builds this plugin with compiler warnings treated as errors, runs policy and live Direct3D rendering tests, and creates the installable ZIP in `build-windows\packages`. The graphics test prefers Microsoft's software adapter when available; it does not benchmark your physical GPU. The script does not install anything into OBS. Source/dependency caches live in `.deps`. The plugin does not link Qt or an encoder library directly.
 
 Linux development build (Ubuntu 24.04):
 
@@ -79,7 +79,7 @@ LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a ctest --test-dir build --output-on-failure
 
 You can set `CMAKE_PREFIX_PATH` to a separately installed OBS SDK. Ubuntu's libobs can be older than the Windows target; the Linux job tests the shared API/OpenGL code, while the Windows job compiles against the pinned 31.1.1 SDK.
 
-Without an OBS SDK, build just the policy tests with `-DBUILD_PLUGIN=OFF`. The live graphics test compiles all shader techniques, renders and reads back sample textures, and exercises the loaded filter. Its CPU software renderer validates correctness, **not hardware throughput**. No production frames are copied back to the CPU by the plugin.
+Without an OBS SDK, build just the policy tests with `-DBUILD_PLUGIN=OFF`. The live graphics tests compile all shader techniques, render and read back sample textures, and exercise the loaded filter on Windows/Direct3D and Linux/OpenGL. Software rendering validates correctness, **not hardware throughput**. No production frames are copied back to the CPU by the plugin.
 
 ## Validation before a live stream
 

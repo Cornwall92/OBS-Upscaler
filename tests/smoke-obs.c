@@ -10,6 +10,52 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <dxgi1_2.h>
+
+/* Hosted Windows runners need not expose a physical GPU. OBS can create a
+ * D3D11 device on the DXGI software adapter, although its normal adapter list
+ * hides that adapter. Selecting its real index exercises the unmodified OBS
+ * D3D11 backend and shader compiler without making a hardware speed claim. */
+static uint32_t test_adapter(void)
+{
+	IDXGIFactory1 *factory = NULL;
+	HRESULT result = CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory);
+	if (FAILED(result)) {
+		fprintf(stderr, "DXGI enumeration unavailable (0x%08lx); trying adapter 0.\n", (unsigned long)result);
+		return 0;
+	}
+
+	uint32_t selected = 0;
+	bool found = false;
+	for (UINT index = 0;; index++) {
+		IDXGIAdapter1 *adapter = NULL;
+		result = factory->lpVtbl->EnumAdapters1(factory, index, &adapter);
+		if (result == DXGI_ERROR_NOT_FOUND)
+			break;
+		if (FAILED(result)) {
+			fprintf(stderr, "DXGI adapter enumeration failed (0x%08lx).\n", (unsigned long)result);
+			break;
+		}
+		DXGI_ADAPTER_DESC1 description;
+		result = adapter->lpVtbl->GetDesc1(adapter, &description);
+		found = SUCCEEDED(result) && (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+		adapter->lpVtbl->Release(adapter);
+		if (found) {
+			selected = index;
+			break;
+		}
+	}
+	factory->lpVtbl->Release(factory);
+	if (found)
+		printf("D3D11 smoke test: selected DXGI software adapter %u.\n", selected);
+	else
+		puts("D3D11 smoke test: no software adapter found; trying adapter 0.");
+	return selected;
+}
+#endif
+
 static unsigned failures;
 #define CHECK(condition, message)                                                                                      \
 	do {                                                                                                           \
@@ -366,9 +412,13 @@ int main(int argc, char **argv)
 	    .range = VIDEO_RANGE_FULL,
 	    .scale_type = OBS_SCALE_BILINEAR,
 	};
+#ifdef _WIN32
+	video.adapter = test_adapter();
+#endif
 	int result = obs_reset_video(&video);
 	if (result != OBS_VIDEO_SUCCESS) {
-		fprintf(stderr, "FAIL: graphics initialization (%d); Linux needs DISPLAY / xvfb-run\n", result);
+		fprintf(stderr, "FAIL: graphics initialization (%d); Linux needs DISPLAY / xvfb-run; "
+				"Windows needs a D3D11-capable DXGI adapter and OBS runtime dependencies.\n", result);
 		obs_shutdown();
 		return 1;
 	}

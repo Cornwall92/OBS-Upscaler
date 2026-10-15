@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "upscale-policy.h"
 
+/* Keep test assertions active in optimized builds without conflicting /D /U
+ * command-line definitions on Microsoft's compiler. */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>

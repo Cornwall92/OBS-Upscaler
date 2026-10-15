@@ -82,7 +82,7 @@ Invoke-Checked cmake @(
 )
 # The SDK's Development install component includes this lightweight API library
 # even with the UI disabled; building it also builds libobs and w32-pthreads.
-Invoke-Checked cmake @('--build', $ObsBuildPath, '--target', 'obs-frontend-api', '--config', $Configuration, '--parallel')
+Invoke-Checked cmake @('--build', $ObsBuildPath, '--target', 'obs-frontend-api', 'libobs-d3d11', '--config', $Configuration, '--parallel')
 Invoke-Checked cmake @('--install', $ObsBuildPath, '--component', 'Development', '--config', $Configuration, '--prefix', $SdkPath)
 
 $ObsBuildSpec = Get-Content (Join-Path $ObsSourcePath 'buildspec.json') -Raw | ConvertFrom-Json
@@ -91,10 +91,44 @@ $PrefixPath = "$SdkPath;$PrebuiltPath"
 Invoke-Checked cmake @(
     '-S', $ProjectRoot, '-B', $BuildPath,
     '-G', 'Visual Studio 17 2022', '-A', 'x64',
-    "-DCMAKE_PREFIX_PATH=$PrefixPath", '-DBUILD_TESTING=ON', '-DENABLE_STRICT_WARNINGS=ON'
+    "-DCMAKE_PREFIX_PATH=$PrefixPath", '-DBUILD_TESTING=ON', '-DBUILD_OBS_SMOKE_TEST=ON', '-DENABLE_STRICT_WARNINGS=ON'
 )
 Invoke-Checked cmake @('--build', $BuildPath, '--config', $Configuration, '--parallel')
-Invoke-Checked ctest @('--test-dir', $BuildPath, '-C', $Configuration, '--output-on-failure')
+Invoke-Checked ctest @('--test-dir', $BuildPath, '-C', $Configuration, '-R', '^upscale-policy$', '--output-on-failure')
+
+# OBS's Windows resource lookup is relative to the current directory. Use the
+# runtime tree produced by the SDK build, which includes ../../data/libobs.
+# Dependency DLLs stay outside the plugin ZIP; the installed OBS supplies them.
+$RuntimePath = Join-Path $ObsBuildPath "rundir/$Configuration/bin/64bit"
+$SdkBinaryPath = Join-Path $SdkPath 'bin/64bit'
+$PrebuiltBinaryPath = Join-Path $PrebuiltPath 'bin'
+$SmokeExecutable = Join-Path $BuildPath "$Configuration/smoke-obs.exe"
+$PluginBinary = Join-Path $BuildPath "$Configuration/obs-upscaler.dll"
+$GraphicsModule = Join-Path $RuntimePath 'libobs-d3d11.dll'
+$PluginData = Join-Path $ProjectRoot 'data'
+@(
+    $SmokeExecutable, $PluginBinary, $GraphicsModule, $PrebuiltBinaryPath,
+    (Join-Path $SdkBinaryPath 'obs.dll'),
+    (Join-Path $SdkBinaryPath 'w32-pthreads.dll'),
+    (Join-Path $ObsBuildPath "rundir/$Configuration/data/libobs/default.effect")
+) | ForEach-Object {
+    if (-not (Test-Path -LiteralPath $_)) {
+        throw "The D3D11 smoke test needs a missing runtime file or directory: $_"
+    }
+}
+$OriginalPath = $env:PATH
+try {
+    $env:PATH = "$RuntimePath;$SdkBinaryPath;$PrebuiltBinaryPath;$OriginalPath"
+    Push-Location -LiteralPath $RuntimePath
+    try {
+        Invoke-Checked $SmokeExecutable @($PluginBinary, $PluginData, $GraphicsModule)
+    } finally {
+        Pop-Location
+    }
+} finally {
+    $env:PATH = $OriginalPath
+}
+
 if (-not $SkipPackage) {
     Invoke-Checked cpack @('--config', (Join-Path $BuildPath 'CPackConfig.cmake'), '-C', $Configuration, '-B', (Join-Path $BuildPath 'packages'))
     Write-Host "Package ready in $BuildPath\packages."
